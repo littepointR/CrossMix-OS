@@ -38,6 +38,7 @@ jobs:
       - run: python -m unittest discover -s _assets/release -p 'test_*.py' -v
       - run: python _assets/tests/test_firmware_check.py
       - run: python _assets/tests/test_updater.py
+      - run: python _assets/tests/test_startup_ssh.py
 
   package:
     name: Build Smart Pro maintenance preview

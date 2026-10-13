@@ -7,6 +7,23 @@ if [ ! -f "$Current_bg" ]; then
     Current_bg="/mnt/SDCARD/trimui/res/skin/transparent.png"
 fi
 
+crossmix_configure_ssh_service() {
+    # Preserve the stock Smart Pro service and its current enabled state.
+    if [ -x /usr/sbin/sshd ] && [ -f /etc/init.d/sshd ]; then
+        echo "Preserving the stock SSH service and authentication."
+        return 0
+    fi
+    # An existing custom service also belongs to the user's configuration.
+    if [ -f /etc/init.d/sshd ]; then
+        echo "Preserving the existing SSH service configuration."
+        return 0
+    fi
+
+    # Install only a missing service; activation remains a user choice.
+    cp "/mnt/SDCARD/System/usr/trimui/etc/init.d/sshd" /etc/init.d/sshd || return 1
+    chmod a+x /etc/init.d/sshd
+}
+
 ################ CrossMix-OS Version Splashscreen ################
 
 version=$(cat /mnt/SDCARD/System/usr/trimui/crossmix-version.txt)
@@ -58,10 +75,7 @@ if [ "$version" != "$FW_patched_version" ]; then
     cp "/mnt/SDCARD/System/usr/trimui/bin/kill_apps.sh" "/usr/trimui/bin/kill_apps.sh"
     chmod a+x "/usr/trimui/bin/kill_apps.sh"
 
-    # custom sshd initd script & disabled by default
-    cp "/mnt/SDCARD/trimui/etc/init.d/sshd" /etc/init.d/sshd
-    chmod a+x /etc/init.d/sshd
-    /etc/init.d/sshd disable
+    crossmix_configure_ssh_service
 
     # fix retroarch path for PortMaster
     cp "/mnt/SDCARD/System/usr/trimui/bin/retroarch" "/usr/bin/retroarch"
@@ -182,25 +196,12 @@ if [ "$version" != "$FW_patched_version" ]; then
     # Displaying only Emulators with roms
     /mnt/SDCARD/Apps/EmuCleaner/launch.sh -s
 
-    ################ Flash boot logo ################
-    if [ "$CrossMix_Update" = "0" ]; then
-
-        read -r Current_device </etc/trimui_device.txt
-
-        if [ "$Current_device" = "tsp" ]; then
-            src_dir="/mnt/SDCARD/Apps/BootLogo/Images_1280x720"
-        else
-            src_dir="/mnt/SDCARD/Apps/BootLogo/Images_1024x768"
-        fi
-
-        "/mnt/SDCARD/Emus/_BootLogo/launch.sh" "$src_dir/- CrossMix-OS.bmp"
-    fi
+    # Boot logo flashing remains available through the manual BootLogo app.
 fi
 
 ######################### CrossMix-OS at each boot #########################
 
-# override empty password on firmware >= v1.1.1
-echo "root:tina" | chpasswd
+# Keep existing account credentials and authorized keys on every boot.
 
 # Apply current led configuration
 /mnt/SDCARD/System/etc/led_config.sh &

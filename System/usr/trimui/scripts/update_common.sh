@@ -48,7 +48,13 @@ crossmix_load_settings() {
 }
 
 crossmix_fetch_file() {
-    curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 --max-time 3600 -o "$2" "$1"
+    local url="$1" destination="$2" ca="$SDCARD_ROOT/System/updates/update_001/ca-certificates.crt"
+    set -- --fail --location --silent --show-error --retry 2 --connect-timeout 15 --max-time 3600 -o "$destination" "$url"
+    # Official Tina firmware can have curl but no installed CA store. Use the
+    # trust bundle shipped in this verified release, without changing /etc or
+    # waiting for the legacy update_001 first-boot marker to be reset.
+    [ -s "$ca" ] && set -- --cacert "$ca" "$@"
+    curl "$@"
 }
 
 crossmix_asset_url() {

@@ -11,5 +11,9 @@ Base: upstream `main` at `206d612fdef83972ed54a17de955125d0c0b3528`. Its install
 - Exclude BIOS/game payloads and restricted or unconfirmed Doom/Stardew PortMaster theme assets from new packages. Keep source history and record exclusions.
 - Fix firmware archive selection when the minimum supported version differs from the bundled version, validate the expected TG5040 image, and correct the firmware backup existence test.
 - Add packaging, updater and firmware fixture tests that run without a physical device.
+- Preserve native firmware SSH, its enabled state and existing authentication during first installation. Avoid starting a second SSH daemon on the same port.
+- Keep password changes and boot-logo flashing user initiated instead of doing them automatically at startup.
+- Use the packaged CA bundle for GitHub HTTPS on stock firmware without a system certificate store.
+- Make the update installer compatible with the stock Tina shell; hardware preflight reproduced and then cleared the unsupported redirection error.
 
 Hardware acceptance is pending. No firmware was flashed during development. Packaging checks do not establish full third-party corresponding-source coverage.
