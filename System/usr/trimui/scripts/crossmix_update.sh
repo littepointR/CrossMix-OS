@@ -1,12 +1,19 @@
 #!/bin/sh
 
-UPDATE_FILE=$(find /mnt/SDCARD -maxdepth 1 -name "CrossMix-OS_v*.zip" -print -quit)
+SDCARD_ROOT=${CROSSMIX_SDCARD_ROOT:-/mnt/SDCARD}
+if [ ! -f "$SDCARD_ROOT/System/usr/trimui/scripts/update_common.sh" ]; then
+  echo "Updater helper is missing. Follow the fork migration guide." >&2
+  exit 2
+fi
+. "$SDCARD_ROOT/System/usr/trimui/scripts/update_common.sh"
+UPDATE_FILE=$(crossmix_pending_archive) || {
+  echo "No matching verified pending manifest/archive. Use OTA or the migration guide." >&2
+  exit 2
+}
 
-if [ ! -f /mnt/SDCARD/System/usr/trimui/scripts/update_common.sh ]; then 
-  /mnt/SDCARD/System/bin/7zz e "$UPDATE_FILE" "System/usr/trimui/scripts/update_common.sh" -o/mnt/SDCARD/System/usr/trimui/scripts -y
-fi 
-
-source /mnt/SDCARD/System/usr/trimui/scripts/update_common.sh
+# Run before extracting an installer, changing CPU settings or moving old files.
+crossmix_install_preflight "$UPDATE_FILE" || exit 2
+Pending_Release=$(cat "$updatedir/pending_release.json")
 
 echo performance >/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 echo 1608000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
@@ -82,16 +89,21 @@ echo "${BLUE}=============  Decompressing new CrossMix archive, please wait...  
 # Install CrossMix new version
 echo "CrossMix archive decompression lasts at least 4 minutes."
 echo -e "\n\n     !!!!!! Please be patient  !!!!!! \n\n"
-/tmp/7zz x -aoa "$UPDATE_FILE" -o"/mnt/SDCARD"
-sync
-
-if [ $? -eq 0 ]; then
+if /tmp/7zz x -aoa "$UPDATE_FILE" -o"/mnt/SDCARD"; then
+  sync
   echo -e "${GREEN}CrossMix v$update_version extraction successful.${NC}"
   # infoscreen.sh -m "CrossMix v$update_version extraction successful."
   mv "$UPDATE_FILE" "/mnt/SDCARD/_Updates"
+  mkdir -p /mnt/SDCARD/System/updates
+  printf '%s\n' "$Pending_Release" > /mnt/SDCARD/System/updates/installed_release.json
+  if [ -f "$BCK_DIR/System/updates/ota_channel.txt" ]; then
+    cp "$BCK_DIR/System/updates/ota_channel.txt" /mnt/SDCARD/System/updates/ota_channel.txt
+  fi
 else
   echo -ne "${RED}CrossMix v$update_version extraction encountered errors.${NC}\n"
   # infoscreen.sh -m "CrossMix v$update_version extraction encountered errors." -t 5
+  echo "Installation stopped. Previous files are preserved in $BCK_DIR." >&2
+  exit 2
 fi
 
 echo "${BLUE}=====================  Restoring saves and savestates...  =====================${NC}"

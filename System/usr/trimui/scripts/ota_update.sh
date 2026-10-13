@@ -1,43 +1,23 @@
 #!/bin/sh
-source /mnt/SDCARD/System/usr/trimui/scripts/update_common.sh
-
-run_bootstrap() {
-	curl -k -s https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/_assets/scripts/ota_bootstrap.sh | sh
-}
+. "${CROSSMIX_SDCARD_ROOT:-/mnt/SDCARD}/System/usr/trimui/scripts/update_common.sh"
 
 main() {
-	check_connection
-	sleep 2
-	clear
-	run_bootstrap
-	clear
-
-	echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n" >>"$updatedir/ota_release.log"
-	echo -e "${timestamp}\n" >>"$updatedir/ota_release.log"
-	/mnt/SDCARD/System/usr/trimui/scripts/update_ota_release.sh | tee -a "$updatedir/ota_release.log"
-
-	# if there is no release to apply, we check if there is hotfix for this version
-	if grep -q -E "^(no release|user cancel)$" "/tmp/ota_release_result"; then # "no release", "user cancel", "download failed", "success"
-		url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/_assets/hotfixes/CrossMix-OS_v$Local_CrossMixVersion.sh"
-
-		if /mnt/SDCARD/System/bin/wget -q --spider "$url"; then
-
-			echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n" >>"$updatedir/ota_hotfix.log"
-			echo -e "${timestamp}\n" >>"$updatedir/ota_hotfix.log"
-			curl -k -s "$url" | sh | tee -a "$updatedir/ota_hotfix.log"
-
-		else
-			clear
-			echo -ne "${PURPLE}Retrieving hotfix information.. ${NC}"
-			echo -ne "${GREEN}DONE${NC}\n\n\n"
-			echo -e "No hotfix available for CrossMix v$Local_CrossMixVersion.\n"
-			echo -ne "${YELLOW}"
-			read -n 1 -s -r -p "Press A to exit"
-		fi
-	fi
-	sleep 2
-	killall -2 SimpleTerminal
-
+    crossmix_load_settings || exit 2
+    mkdir -p "$updatedir"
+    choice=$(printf 'Stable\nPrerelease (device tests)\nCancel\n' | \
+        "$SDCARD_ROOT/System/usr/trimui/scripts/shellect.sh" -t "Update channel (current: $UPDATE_CHANNEL)" \
+        -b "Prereleases require device testing. Press A to choose.")
+    case "$choice" in
+        Stable) echo stable > "$updatedir/ota_channel.txt" ;;
+        "Prerelease (device tests)") echo prerelease > "$updatedir/ota_channel.txt" ;;
+        *) exit 0 ;;
+    esac
+    # Execute only the updater included with this installation.
+    printf '\n%s\n' "$timestamp" >> "$updatedir/ota_release.log"
+    sh "$SDCARD_ROOT/System/usr/trimui/scripts/update_ota_release.sh" 2>&1 | tee -a "$updatedir/ota_release.log"
+    printf '\nPress A to exit.\n'
+    read -r -n 1 answer
+    killall -2 SimpleTerminal
 }
 
-main
+main "$@"

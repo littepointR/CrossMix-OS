@@ -1,0 +1,60 @@
+name: Release tooling checks
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '_assets/release/**'
+      - '_assets/tests/**'
+      - '_assets/scripts/**'
+      - 'System/starts/**'
+      - 'System/usr/trimui/scripts/**'
+      - 'System/usr/trimui/crossmix-version.txt'
+      - 'System/etc/**'
+      - 'trimui/firmwares/*.txt'
+      - 'Apps/OTA-update/**'
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/**'
+      - '_assets/release/**'
+      - '_assets/tests/**'
+      - '_assets/scripts/**'
+      - 'System/starts/**'
+      - 'System/usr/trimui/scripts/**'
+      - 'System/usr/trimui/crossmix-version.txt'
+      - 'System/etc/**'
+      - 'trimui/firmwares/*.txt'
+      - 'Apps/OTA-update/**'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /_assets/release/**
+            /_assets/tests/**
+            /_assets/scripts/**
+            /System/starts/**
+            /System/usr/trimui/scripts/**
+            /System/usr/trimui/crossmix-version.txt
+            /System/etc/**
+            /trimui/firmwares/*.txt
+            /Apps/OTA-update/**
+            /LICENSE
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install regression fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bash jq unzip
+      - run: python -m unittest discover -s _assets/release -p 'test_*.py' -v
+      - run: python _assets/tests/test_firmware_check.py
+      - run: python _assets/tests/test_updater.py

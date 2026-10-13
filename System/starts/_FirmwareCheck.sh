@@ -4,7 +4,8 @@ PATH="/mnt/SDCARD/System/bin:/mnt/SDCARD/System/usr/trimui/scripts/:$PATH"
 export LD_LIBRARY_PATH="/mnt/SDCARD/System/lib:/usr/trimui/lib:$LD_LIBRARY_PATH"
 
 
-if ! read -r current_device </etc/trimui_device.txt; then
+current_device=$(cat /etc/trimui_device.txt 2>/dev/null)
+if [ -z "$current_device" ]; then
     RES=$(fbset | awk '/geometry/ {print $2 "x" $3}')
     if [ "$RES" = "1280x720" ]; then
         current_device="tsp"
@@ -13,6 +14,11 @@ if ! read -r current_device </etc/trimui_device.txt; then
     fi
     echo -n $current_device >/etc/trimui_device.txt
 
+fi
+
+if [ "$current_device" != "tsp" ]; then
+    echo "Unsupported device '$current_device': this CrossMix build supports TrimUI Smart Pro only."
+    exit 1
 fi
 
 read -r last_device </mnt/SDCARD/System/etc/last_device.txt
@@ -30,8 +36,64 @@ if [ ! -f "$CrossMixFWfile" ]; then
     exit 0
 fi
 
-Current_FW_Revision=$(grep 'DISTRIB_DESCRIPTION' /etc/openwrt_release | cut -d '.' -f 3)
-Required_FW_Revision=$(sed -n '2p' "$CrossMixFWfile")
+Current_FW_Revision=$(grep 'DISTRIB_DESCRIPTION' /etc/openwrt_release | cut -d '.' -f 3 | tr -d '\r')
+Required_FW_Revision=$(sed -n '2{s/\r$//;p;}' "$CrossMixFWfile")
+for firmware_revision in "$Current_FW_Revision" "$Required_FW_Revision"; do
+    case "$firmware_revision" in
+        ''|*[!0-9]*) echo "Invalid firmware revision metadata; canceling firmware check."; exit 1 ;;
+    esac
+done
+
+# The minimum supported firmware and the bundled upgrade can be different.
+# Prefer the exact minimum; only fall back to explicitly declared Smart Pro firmware.
+select_firmware_archive() {
+    printf '%s\n' "$Required_FW_Version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+    FIRMWARE_VERSION="$Required_FW_Version"
+    FIRMWARE_REVISION="$Required_FW_Revision"
+    FIRMWARE_PATH="/mnt/SDCARD/trimui/firmwares/firmware_tsp_v${FIRMWARE_VERSION}_${FIRMWARE_REVISION}.7z.001"
+    [ -f "$FIRMWARE_PATH" ] && return 0
+
+    local bundled_config="/mnt/SDCARD/trimui/firmwares/BundledFwVersion.txt"
+    [ -f "$bundled_config" ] || return 1
+    local bundled_version=$(sed -n '1{s/\r$//;p;}' "$bundled_config")
+    local bundled_revision=$(sed -n '2{s/\r$//;p;}' "$bundled_config")
+    case "$bundled_revision" in ''|*[!0-9]*) return 1 ;; esac
+    case "$bundled_version" in ''|*[!0-9.]*) return 1 ;; esac
+    [ "$bundled_revision" -ge "$Required_FW_Revision" ] || return 1
+    awk -v bundled="$bundled_version" -v required="$Required_FW_Version" 'BEGIN {
+        if (bundled !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ || required !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) exit 1;
+        split(bundled, b, "."); split(required, r, ".");
+        for (i = 1; i <= 3; i++) {
+            if (b[i] + 0 > r[i] + 0) exit 0;
+            if (b[i] + 0 < r[i] + 0) exit 1;
+        }
+        exit 0;
+    }' || return 1
+
+    FIRMWARE_VERSION="$bundled_version"
+    FIRMWARE_REVISION="$bundled_revision"
+    FIRMWARE_PATH="/mnt/SDCARD/trimui/firmwares/firmware_tsp_v${FIRMWARE_VERSION}_${FIRMWARE_REVISION}.7z.001"
+    [ -f "$FIRMWARE_PATH" ]
+}
+
+# A successful listing proves the split volumes can be opened. Select only the
+# expected TG5040 image, rather than CRC or size fields from another archive entry.
+check_firmware_archive() {
+    local firmware_path="$1"
+    local firmware_file="$2"
+    local listing
+    listing=$(/mnt/SDCARD/System/bin/7zz l "$firmware_path" -slt "$firmware_file") || return 1
+    FW_Size=$(printf '%s\n' "$listing" | awk -F ' = ' -v image="$firmware_file" '
+        /^Path = / { selected = ($2 == image) }
+        selected && /^Size = / { print $2; exit }')
+    ARCHIVE_CRC=$(printf '%s\n' "$listing" | awk -F ' = ' -v image="$firmware_file" '
+        /^Path = / { selected = ($2 == image) }
+        selected && /^CRC = / { print $2; exit }' | tr 'a-f' 'A-F')
+    case "$FW_Size" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$FW_Size" -gt 0 ] || return 1
+    [ "${#ARCHIVE_CRC}" -eq 8 ] || return 1
+    case "$ARCHIVE_CRC" in *[!0-9A-F]*) return 1 ;; esac
+}
 
 # Function to check CRC and update message
 check_firmware_crc() {
@@ -41,11 +103,16 @@ check_firmware_crc() {
     message="${message}Checking firmware integrity........"
     /mnt/SDCARD/System/usr/trimui/scripts/infoscreen2.sh -m "$message" -fs 12 -fi 0 -p top-left -fb -sp -ff "/mnt/SDCARD/Themes/CrossMix - OS/wqy-microhei.ttf" -i "/mnt/SDCARD/trimui/firmwares/FW_Screen_Wait.jpg" &
 
-    # Extract CRC from the 7z archive
-    ARCHIVE_CRC=$(/mnt/SDCARD/System/bin/7zz l "$firmware_path" -slt "$firmware_file" | grep "CRC = " | awk '{print $3}' | tr 'a-f' 'A-F')
+    if ! check_firmware_archive "$firmware_path" "$firmware_file"; then
+        echo "Cannot read the firmware image metadata from $firmware_path"
+        message="${message}KO"
+        return 1
+    fi
 
     # Calculate CRC of the extracted file
-    EXTRACTED_CRC=$(crc32 "/mnt/SDCARD/$firmware_file" | awk '{print $1}' | tr 'a-f' 'A-F')
+    local extracted_crc_output
+    extracted_crc_output=$(crc32 "/mnt/SDCARD/$firmware_file") || return 1
+    EXTRACTED_CRC=$(printf '%s\n' "$extracted_crc_output" | awk '{print $1}' | tr 'a-f' 'A-F')
 
     # Compare the CRC values
     if [ -n "$ARCHIVE_CRC" ] && [ -n "$EXTRACTED_CRC" ] && [ "$ARCHIVE_CRC" = "$EXTRACTED_CRC" ]; then
@@ -65,8 +132,10 @@ diagnose() {
     message="${message}\nChecking filesystem..."
     /mnt/SDCARD/System/usr/trimui/scripts/infoscreen2.sh -m "$message" -fs 12 -fi 0 -p top-left -fb -sp -ff "/mnt/SDCARD/Themes/CrossMix - OS/wqy-microhei.ttf" -i "/mnt/SDCARD/trimui/firmwares/FW_Screen_Wait.jpg" &
     check_filesystem
-    FW_Size=$(/mnt/SDCARD/System/bin/7zz l "$FIRMWARE_PATH" -slt "$FIRMWARE_FILE" | awk ' /^Path = / {found=1; next}  found && /^Size = / { print $3; exit }
-')
+    if ! check_firmware_archive "$FIRMWARE_PATH" "$FIRMWARE_FILE"; then
+        echo "Cannot diagnose firmware archive: image metadata is unavailable."
+        return 1
+    fi
 
     FW_Size_MB=$(($FW_Size / 1024 / 1024))
     if ! check_available_space "$(($FW_Size_MB + 100))"; then
@@ -97,15 +166,31 @@ else
 
     if [ "$Current_FW_Revision" -lt "$Required_FW_Revision" ]; then
 
-        source /mnt/SDCARD/System/usr/trimui/scripts/common_functions.sh
+        . /mnt/SDCARD/System/usr/trimui/scripts/common_functions.sh
 
         pgrep -f trimui_inputd >/dev/null || { cd "/mnt/SDCARD/trimui/app" && ./trimui_inputd & } # we need input
 
         CrossMix_version=$(cat /mnt/SDCARD/System/usr/trimui/crossmix-version.txt)
         Current_FW_Version="$(cat /etc/version)"
-        Required_FW_Version=$(sed -n '1p' "$CrossMixFWfile")
+        Required_FW_Version=$(sed -n '1{s/\r$//;p;}' "$CrossMixFWfile")
 
         echo "Current firmware ($Current_FW_Version - $Current_FW_Revision) must be updated to $Required_FW_Version - $Required_FW_Revision to support CrossMix OS v$CrossMix_version."
+
+        FIRMWARE_FILE="trimui_tg5040.awimg"
+        message="Current   FW version: $Current_FW_Version - $Current_FW_Revision\nRequired FW version: $Required_FW_Version - $Required_FW_Revision\n \n \n"
+        crc_verified=false
+
+        # Validate the selected archive before changing the internal filesystem.
+        if ! select_firmware_archive || ! check_firmware_archive "$FIRMWARE_PATH" "$FIRMWARE_FILE"; then
+            echo "Compatible Smart Pro firmware archive is missing or unreadable: $FIRMWARE_PATH"
+            pkill presenter
+            sleep 0.5
+            message="${message}Compatible firmware archive missing or invalid.\nCheck that all split archive volumes are present.\nCanceling update.\n"
+            /mnt/SDCARD/System/usr/trimui/scripts/infoscreen2.sh -m "$message" -fs 12 -fi 0 -p top-left -fb -ff "/mnt/SDCARD/Themes/CrossMix - OS/wqy-microhei.ttf" -i "/mnt/SDCARD/trimui/firmwares/FW_Screen_Fail.jpg" -k rout A "Exit"
+            exit 1
+        fi
+        echo "Selected Smart Pro firmware: $FIRMWARE_VERSION - $FIRMWARE_REVISION"
+        message="${message}Upgrade FW version: $FIRMWARE_VERSION - $FIRMWARE_REVISION\n"
 
         # Install new busybox from PortMaster, credits : https://github.com/kloptops/TRIMUI_EX
 
@@ -152,20 +237,6 @@ else
 
         sync
 
-        FIRMWARE_PATH="/mnt/SDCARD/trimui/firmwares/firmware_${current_device}_v${Required_FW_Version}_${Required_FW_Revision}.7z.001"
-        FIRMWARE_FILE="trimui_tg5040.awimg"
-        message="Current   FW version: $Current_FW_Version - $Current_FW_Revision\nRequired FW version: $Required_FW_Version - $Required_FW_Revision\n \n \n"
-        crc_verified=false
-
-        if [ ! -f "$FIRMWARE_PATH" ]; then
-            echo "Firmware archive file not found: $FIRMWARE_PATH"
-            pkill presenter
-            sleep 0.5
-            message="${message}Firmware compressed file not found\nCanceling update.\n"
-            /mnt/SDCARD/System/usr/trimui/scripts/infoscreen2.sh -m "$message" -fs 12 -fi 0 -p top-left -fb -ff "/mnt/SDCARD/Themes/CrossMix - OS/wqy-microhei.ttf" -i "/mnt/SDCARD/trimui/firmwares/FW_Screen_Fail.jpg" -k rout A "Exit"
-            exit 1
-        fi
-
         if [ -f "/mnt/SDCARD/$FIRMWARE_FILE" ]; then
             echo "Firmware file already exists, checking CRC..."
 
@@ -181,13 +252,13 @@ else
         fi
 
         if [ "$crc_verified" = false ]; then
-            message="${message}\n \nExtracting new firmware v$Required_FW_Version..."
+            message="${message}\n \nExtracting new firmware v$FIRMWARE_VERSION..."
             pkill presenter
             sleep 0.5
             /mnt/SDCARD/System/usr/trimui/scripts/infoscreen2.sh -m "$message" -fs 12 -fi 0 -p top-left -fb -sp -ff "/mnt/SDCARD/Themes/CrossMix - OS/wqy-microhei.ttf" -i "/mnt/SDCARD/trimui/firmwares/FW_Screen_Wait.jpg" &
 
             /mnt/SDCARD/System/usr/trimui/scripts/cpufreq.sh ondemand 3 7
-            if ! /mnt/SDCARD/System/bin/7zz x "$FIRMWARE_PATH" -o"/mnt/SDCARD" -y; then
+            if ! /mnt/SDCARD/System/bin/7zz x "$FIRMWARE_PATH" "$FIRMWARE_FILE" -o"/mnt/SDCARD" -y; then
                 echo "Failed to extract firmware"
                 pkill presenter
                 sleep 0.5
@@ -217,7 +288,7 @@ else
 
         if [ "$crc_verified" = true ]; then
             # Removing backup from previous FW update runs
-            if -f "/mnt/SDCARD/trimui/firmwares/Last_Automatic_Backup.txt"; then
+            if [ -f "/mnt/SDCARD/trimui/firmwares/Last_Automatic_Backup.txt" ]; then
                 Last_Automatic_Backup=$(cat /mnt/SDCARD/trimui/firmwares/Last_Automatic_Backup.txt)
                 if [ -f "/mnt/SDCARD/System/backups/firmware_settings/$current_device/$Last_Automatic_Backup" ]; then
                     echo "Removing last automatic backup: $Last_Automatic_Backup"
@@ -261,61 +332,44 @@ fi
 
 ################ check if a CrossMix-OS update is available ################
 
-
-
-# Find the update file
-UPDATE_FILE=$(find /mnt/SDCARD -maxdepth 1 -name "CrossMix-OS_v*.zip" -print -quit)
-
-if [ -n "$UPDATE_FILE" ]; then
-    /usr/trimui/bin/trimui_inputd & # we need input
-    echo "CrossMix-OS install file found: $UPDATE_FILE"
-    initial_version=$(cat /mnt/SDCARD/System/usr/trimui/crossmix-version.txt)
-    update_version=$(echo "$UPDATE_FILE" | awk -F'_v|\.zip' '{print $2}')
-
-    # Compare the versions
-    if [ "$(echo "$update_version" | tr -d '.')" -gt "$(echo "$initial_version" | tr -d '.')" ]; then
-        echo "The CrossMix update file (v$update_version) is greater than the current version installed ($initial_version)."
-
-        minspace=$((20 * 1024))
-        rootfs_space=$(df / | awk 'NR==2 {print $4}')
-        if [ "$rootfs_space" -lt "$minspace" ]; then
-            echo "Error: Available space on internal storage is less than 20 MB"
-            infoscreen.sh -m "CrossMix-OS update v$update_version found. Not enough space on internal storage to update." -k "A B START MENU" -fs 30
-            exit 1
-        else
-            echo "Available space on / is sufficient: ${rootfs_space} KB"
-        fi
-
-        if [ ! -f "/mnt/SDCARD/trimui/res/crossmix-os/bg-info.png" ] ||
-            [ ! -f "/mnt/SDCARD/System/bin/sdl2imgshow" ] ||
-            [ ! -f "/mnt/SDCARD/System/usr/trimui/scripts/crossmix_update.sh" ] ||
-            [ ! -f "/mnt/SDCARD/System/usr/trimui/scripts/getkey.sh" ] ||
-            [ ! -f "/mnt/SDCARD/System/usr/trimui/scripts/common_launcher.sh" ] ||
-            [ ! -f "/mnt/SDCARD/System/usr/trimui/scripts/evtest" ]; then
-            echo "One or more required files are missing."
-            /mnt/SDCARD/System/bin/7zz -aoa x "$UPDATE_FILE" \
-                -o"/mnt/SDCARD" \
-                -i"!System/bin/*" \
-                -i"!System/lib/*" \
-                -i"!System/resources/*" \
-                -i"!System/usr/trimui/scripts/*" \
-                -i"!trimui/res/crossmix-os/*"
-            sync
-        fi
-
-        button=$(infoscreen.sh -m "CrossMix-OS update v$update_version found. Press A to install, B to cancel." -k "A B")
-        if [ "$button" = "A" ]; then
-            /mnt/SDCARD/System/bin/7zz e "$UPDATE_FILE" "System/usr/trimui/scripts/crossmix_update.sh" -o/tmp -y
-            chmod a+x "/tmp/crossmix_update.sh"
-            cp /mnt/SDCARD/System/bin/text_viewer /tmp
-            infoscreen.sh -m "Updating CrossMix to v$update_version" -t 1
-            pkill -9 preload.sh
-            pkill -9 runtrimui.sh
-            /tmp/text_viewer -s "/tmp/crossmix_update.sh" -f 25 -t "                            CrossMix-OS Update v$update_version                                      "
-        fi
-    else
-        echo "The CrossMix update version ($update_version) is not greater than the current version ($initial_version)."
+crossmix_boot_handoff() {
+    local sd="${CROSSMIX_SDCARD_ROOT:-/mnt/SDCARD}" archive temp rootfs_space button
+    [ -f "$sd/System/updates/pending_release.json" ] || {
+        echo "No verified pending CrossMix update."
+        return 0
+    }
+    [ -f "$sd/System/usr/trimui/scripts/update_common.sh" ] || return 2
+    # Use the installed helper before extracting or running any archive content.
+    . "$sd/System/usr/trimui/scripts/update_common.sh"
+    archive=$(crossmix_pending_archive) || return 2
+    crossmix_install_preflight "$archive" || return 2
+    crossmix_release_is_new || {
+        echo "Pending CrossMix release is already installed or not newer."
+        return 0
+    }
+    rootfs_space=$(df -Pk / | awk 'NR == 2 {print $4}')
+    case "$rootfs_space" in ""|*[!0-9]*) return 2 ;; esac
+    [ "$rootfs_space" -ge 20480 ] || {
+        echo "Less than 20 MiB free on internal storage; update canceled." >&2
+        return 2
+    }
+    if [ ! -x "$sd/System/usr/trimui/scripts/infoscreen.sh" ] || [ ! -x "$sd/System/bin/text_viewer" ]; then
+        echo "Trusted update UI is missing. Follow the manual migration guide." >&2
+        return 2
     fi
-else
-    echo "No CrossMix update file found."
-fi
+    "${CROSSMIX_INTERNAL_ROOT:-/usr/trimui}/bin/trimui_inputd" &
+    button=$("$sd/System/usr/trimui/scripts/infoscreen.sh" -m "CrossMix $Release_Tag found. Press A to install, B to cancel." -k "A B")
+    [ "$button" = "A" ] || return 0
+    temp="${CROSSMIX_TMP_ROOT:-/tmp}/crossmix-update.$$"
+    mkdir -p "$temp" || return 2
+    "$sd/System/bin/7zz" e "$archive" "System/usr/trimui/scripts/crossmix_update.sh" "-o$temp" -y || return 2
+    [ -s "$temp/crossmix_update.sh" ] && sh -n "$temp/crossmix_update.sh" || return 2
+    chmod a+x "$temp/crossmix_update.sh"
+    cp "$sd/System/bin/text_viewer" "$temp/text_viewer" || return 2
+    "$sd/System/usr/trimui/scripts/infoscreen.sh" -m "Updating CrossMix to $Release_Tag" -t 1
+    pkill -9 preload.sh
+    pkill -9 runtrimui.sh
+    "$temp/text_viewer" -s "$temp/crossmix_update.sh" -f 25 -t "CrossMix-OS Update $Release_Tag"
+}
+
+crossmix_boot_handoff

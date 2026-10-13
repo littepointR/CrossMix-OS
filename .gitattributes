@@ -1,0 +1,5 @@
+# Keep device scripts runnable after Windows checkouts. Do not normalize binaries.
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

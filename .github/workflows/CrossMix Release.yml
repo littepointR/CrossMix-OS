@@ -1,58 +1,102 @@
-name: CrossMix-OS Release
-
-permissions:
-  id-token: "write"
-  contents: "write"
-  packages: "write"
-  pull-requests: "read"
+name: Smart Pro maintenance release
 
 on:
   push:
     tags:
-      - v*
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  tagged-release:
-    name: Tagged release
+  smoke:
+    name: Release packaging smoke tests
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v3
-      - name: Get version
-        run: |
-          TAG="${{ github.ref_name }}"
-          echo "BUILD_VERSION=${TAG#v}" >> $GITHUB_ENV
-      - name: Install 7-Zip
-        run: |
-          mkdir -p /home/runner/work/CrossMix-OS/tools
-          wget https://www.7-zip.org/a/7z2406-linux-x64.tar.xz -P /home/runner/work/CrossMix-OS/tools
-          tar xvf /home/runner/work/CrossMix-OS/tools/7z2406-linux-x64.tar.xz -C /home/runner/work/CrossMix-OS/tools
-          sudo cp /home/runner/work/CrossMix-OS/tools/7zz /usr/local/bin/
-      - name: Extract RetroArch cores
-        run: |
-          find /home/runner/work/CrossMix-OS/CrossMix-OS/RetroArch/.retroarch/cores -name "*.7z" -execdir 7zz x {} \; -execdir rm {} \;
-      - name: Cleaning image...
-        run: |
-          find /home/runner/work/CrossMix-OS/CrossMix-OS -type f -name ".gitkeep" -delete
-          rm -rf /home/runner/work/CrossMix-OS/CrossMix-OS/_assets
-          rm /home/runner/work/CrossMix-OS/CrossMix-OS/LICENSE
-          rm /home/runner/work/CrossMix-OS/CrossMix-OS/README.md
-          ls -la /home/runner/work/CrossMix-OS/CrossMix-OS
-          rm -rf /home/runner/work/CrossMix-OS/CrossMix-OS/.git
-          rm -rf /home/runner/work/CrossMix-OS/CrossMix-OS/.github
-          ls -la /home/runner/work/CrossMix-OS/CrossMix-OS
-          cd /home/runner/work/CrossMix-OS/CrossMix-OS
-          /usr/local/bin/7zz a RetroArch/default_config.7z RetroArch/retroarch.cfg RetroArch/.retroarch/config/*
-      - name: Zipping release
-        run: |
-          shopt -s dotglob
-          cd /home/runner/work/CrossMix-OS/CrossMix-OS
-          zip -r "/home/runner/work/CrossMix-OS/CrossMix-OS_v${{ env.BUILD_VERSION }}.zip" ./*
-      - name: Create Release
-        uses: marvinpinto/action-automatic-releases@latest
+      - uses: actions/checkout@v4
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          title: "CrossMix-OS v${{ env.BUILD_VERSION }}"
-          prerelease: false
-          files: "/home/runner/work/CrossMix-OS/CrossMix-OS_v${{ env.BUILD_VERSION }}.zip"
-          draft: true
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /_assets/release/**
+            /_assets/tests/**
+            /_assets/scripts/**
+            /System/starts/**
+            /System/usr/trimui/scripts/**
+            /System/usr/trimui/crossmix-version.txt
+            /System/etc/**
+            /trimui/firmwares/*.txt
+            /Apps/OTA-update/**
+            /LICENSE
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install regression fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bash jq unzip
+      - run: python -m unittest discover -s _assets/release -p 'test_*.py' -v
+      - run: python _assets/tests/test_firmware_check.py
+      - run: python _assets/tests/test_updater.py
+
+  package:
+    name: Build Smart Pro maintenance preview
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y 7zip
+      - name: Build preview assets
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/crossmix-release
+        run: |
+          python _assets/release/package_release.py \
+            --source "$GITHUB_WORKSPACE" \
+            --output "$RELEASE_DIR" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --tag "${GITHUB_REF_NAME}" \
+            --prerelease \
+            --prepare
+      - name: Verify generated asset checksums
+        working-directory: ${{ runner.temp }}/crossmix-release
+        run: sha256sum --check --ignore-missing SHA256SUMS
+      - name: Save reviewable build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-pro-maintenance-preview
+          path: ${{ runner.temp }}/crossmix-release/*
+          compression-level: 0
+          if-no-files-found: error
+      - name: Create or refresh draft preview release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_DIR: ${{ runner.temp }}/crossmix-release
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release-state.json" 2>/dev/null; then
+            if ! jq -e '.isDraft == true' "$RUNNER_TEMP/release-state.json" >/dev/null; then
+              echo 'Refusing to replace assets of a published release.' >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/* --clobber
+            gh release edit "$RELEASE_TAG" --draft --prerelease \
+              --title "Smart Pro maintenance preview $RELEASE_TAG" \
+              --notes-file "$RELEASE_DIR/RELEASE_NOTES.md"
+          else
+            gh release create "$RELEASE_TAG" "$RELEASE_DIR"/* \
+              --verify-tag --draft --prerelease \
+              --title "Smart Pro maintenance preview $RELEASE_TAG" \
+              --notes-file "$RELEASE_DIR/RELEASE_NOTES.md"
+          fi
