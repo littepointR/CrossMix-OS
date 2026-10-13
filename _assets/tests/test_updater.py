@@ -51,9 +51,13 @@ class UpdaterTest(unittest.TestCase):
             shutil.copyfile(ROOT / "System/usr/trimui/scripts" / name, scripts / name)
         self.write_mock("curl", r'''#!/bin/sh
 out=""
+ca=""
+printf '%s\n' "$@" >> "$FIXTURE/curlargs.log"
 while [ "$#" -gt 0 ]; do
-    case "$1" in -o) out=$2; shift 2;; -H|--retry|--connect-timeout|--max-time) shift 2;; -*) shift;; *) url=$1; shift;; esac
+    case "$1" in -o) out=$2; shift 2;; --cacert) ca=$2; shift 2;; -H|--retry|--connect-timeout|--max-time) shift 2;; -*) shift;; *) url=$1; shift;; esac
 done
+if [ "${MOCK_REQUIRE_CA:-0}" = 1 ] && [ ! -s "$ca" ]; then exit 60; fi
+if [ "${MOCK_CA_ERROR:-0}" = 1 ]; then exit 60; fi
 printf '%s\n' "$url" >> "$FIXTURE/network.log"
 case "$url" in
     https://api.github.com/repos/littepointR/CrossMix-OS/releases\?per_page=100) src="$FIXTURE/releases.json";;
@@ -144,6 +148,35 @@ esac
         native = subprocess.run([str(Path(JQ).resolve()), "."], input="{invalid", text=True, capture_output=True)
         self.assertNotEqual(native.returncode, 0)
         self.assertEqual(malformed.returncode, native.returncode, malformed.stdout + malformed.stderr)
+
+    def test_installer_has_posix_shell_syntax(self):
+        if os.name == "nt":
+            posix_shell = Path(SHELL).resolve().parent.parent / "usr/bin/dash.exe"
+        else:
+            posix_shell = Path(shutil.which("dash") or "/bin/sh")
+        if not posix_shell.exists():
+            self.skipTest("dash is required for the POSIX syntax regression")
+        result = subprocess.run([str(posix_shell), "-n", shell_path(ROOT / "System/usr/trimui/scripts/crossmix_update.sh")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_first_install_uses_release_bundled_ca_without_system_store(self):
+        self.fixture()
+        bundle = self.sd / "System/updates/update_001/ca-certificates.crt"
+        bundle.parent.mkdir(parents=True)
+        bundle.write_text("fixture release CA\n")
+        result = self.run_sh('crossmix_fetch_file "https://api.github.com/repos/littepointR/CrossMix-OS/releases?per_page=100" "$FIXTURE/fetched.json"\n', MOCK_REQUIRE_CA="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        arguments = (self.work / "curlargs.log").read_text().splitlines()
+        self.assertIn("--cacert", arguments)
+        self.assertIn(shell_path(bundle), arguments)
+        self.assertNotIn("-k", arguments)
+        self.assertNotIn("--insecure", arguments)
+
+    def test_tls_certificate_error_is_not_bypassed(self):
+        self.fixture()
+        result = self.run_sh('crossmix_fetch_file "https://api.github.com/repos/littepointR/CrossMix-OS/releases?per_page=100" "$FIXTURE/fetched.json"\n', MOCK_CA_ERROR="1")
+        self.assertEqual(result.returncode, 60, result.stdout + result.stderr)
+        self.assertNotIn("--insecure", (self.work / "curlargs.log").read_text())
 
     def test_split_zip_is_reassembled_exactly(self):
         data, _ = self.fixture(split=True)
