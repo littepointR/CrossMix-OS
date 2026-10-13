@@ -67,7 +67,7 @@ if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
         self.write_mock("ip", "#!/bin/sh\necho '1.0.0.0 dev wlan0 src 192.168.1.10'\n")
         self.write_mock("pkill", "#!/bin/sh\nexit 0\n")
         # Native Windows jq prints CRLF; the handheld's jq prints LF.
-        self.write_mock("jq", '#!/bin/sh\nset -o pipefail\n"' + shell_path(JQ) + '" "$@" | tr -d "\\r"\n')
+        self.write_mock("jq", '#!/bin/bash\nset -o pipefail\n"' + shell_path(JQ) + '" "$@" | tr -d "\\r"\n')
         self.write_mock("7zz", '''#!/bin/sh
 case "$1" in
   t) unzip -t "$2" >/dev/null;;
@@ -135,6 +135,15 @@ esac
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.sd / "System/updates/CrossMix-OS_v1.3.6.zip").read_bytes(), data)
         self.assertFalse((self.sd / "CrossMix-OS_v1.3.6.zip").exists())
+
+    def test_jq_wrapper_preserves_failure_exit_status(self):
+        self.fixture()
+        result = self.run_sh('jq -e \' .schema == 2 \' "$FIXTURE/assets/release-manifest.json"\n')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        malformed = self.run_sh('printf \'{invalid\' | jq .\n')
+        native = subprocess.run([str(Path(JQ).resolve()), "."], input="{invalid", text=True, capture_output=True)
+        self.assertNotEqual(native.returncode, 0)
+        self.assertEqual(malformed.returncode, native.returncode, malformed.stdout + malformed.stderr)
 
     def test_split_zip_is_reassembled_exactly(self):
         data, _ = self.fixture(split=True)

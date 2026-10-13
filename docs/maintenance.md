@@ -2,7 +2,7 @@
 
 当前只维护 Smart Pro。`upstream` 指向原仓库，`origin` 指向本 fork。引入上游提交应先检查兼容性，避免同步覆盖独立更新地址。
 
-安装版本在 `System/usr/trimui/crossmix-version.txt`。基线文件仍标记 1.3.0，虽然主分支已有后续未发布改进。本 fork 选择 1.3.6 作为维护版本；首个预览标签为 `v1.3.6-preview.1`，后续正式标签可用 `v1.3.6`。标签的数字版本和包内版本应一致。更新仓库与渠道在 `System/etc/update.json`。
+安装版本在 `System/usr/trimui/crossmix-version.txt`。基线文件仍标记 1.3.0，虽然主分支已有后续未发布改进。本 fork 选择 1.3.6 作为维护版本；当前预览标签为 `v1.3.6-preview.2`，后续正式标签可用 `v1.3.6`。标签的数字版本和包内版本应一致。更新仓库与渠道在 `System/etc/update.json`。
 
 ## 检查与打包
 
